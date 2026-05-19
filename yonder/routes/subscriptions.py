@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException
 
 from yonder.deps import FetcherDep, PipelineDep, PipelineLike, StateDep
 from yonder.fetch import FetchError, fetch_url
+from yonder.probe import probe_servers
 from yonder.schemas import AddSubscriptionReq, PatchSubscriptionReq
 from yonder.state import Data, State
 from yonder.vless import Server, VlessParseError, parse_link, parse_subscription
@@ -61,6 +62,22 @@ async def refresh_subscription(
     if was_active_here:
         await _mark_applying_and_signal(state, pipeline)
     return state.snapshot()
+
+
+@router.post("/{sub_id}/test")
+async def test_subscription(sub_id: str, state: StateDep) -> Data:
+    """Run a TCP probe against every server in this subscription.
+
+    Returns the post-merge snapshot so the UI can immediately render
+    latency badges and re-sort tiles by ping. We deliberately do not signal
+    the apply pipeline — testing is observation-only.
+    """
+    snap = state.snapshot()
+    sub = next((s for s in snap.subscriptions if s.id == sub_id), None)
+    if sub is None:
+        raise HTTPException(404, f"unknown subscription: {sub_id!r}")
+    results = await probe_servers(sub.servers)
+    return await state.merge_pings(results)
 
 
 @router.patch("/{sub_id}")

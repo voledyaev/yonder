@@ -129,7 +129,7 @@
 
                     <template x-if="sub.servers.length > 0">
                         <div class="server-grid">
-                            <template x-for="srv in sub.servers" :key="srv.id">
+                            <template x-for="srv in sortedServers(sub)" :key="srv.id">
                                 <button type="button"
                                         class="server"
                                         :class="{ 'server--active': isActive(sub.id, srv.id) }"
@@ -138,12 +138,20 @@
                                     <span class="server__country" x-text="srv.country"></span>
                                     <span class="server__name" x-text="srv.name"></span>
                                     <span class="server__host muted" x-text="srv.host"></span>
+                                    <span class="server__ping"
+                                          :class="pingClass(srv.id)"
+                                          x-text="pingLabel(srv.id)"></span>
                                 </button>
                             </template>
                         </div>
                     </template>
 
                     <div class="actions">
+                        <button type="button" class="btn-secondary" :disabled="busyOrApplying || testingSubId === sub.id"
+                                @click="testSubscription(sub.id)">
+                            <span x-show="testingSubId !== sub.id">Test</span>
+                            <span x-show="testingSubId === sub.id">Testing…</span>
+                        </button>
                         <button type="button" class="btn-secondary" :disabled="busyOrApplying"
                                 @click="refreshSubscription(sub.id)">Refresh</button>
                         <button type="button" class="btn-secondary" :disabled="busyOrApplying"

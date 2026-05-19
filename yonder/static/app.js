@@ -28,6 +28,10 @@ function vpnui() {
         // UI flags
         busy: false,
         error: "",
+        // ID of the subscription currently being TCP-probed, or "" when
+        // idle. Kept separate from `busy` because a probe takes ~2s and
+        // we don't want it to grey out the whole UI — only its own button.
+        testingSubId: "",
 
         // ---- Lifecycle ----
 
@@ -77,6 +81,48 @@ function vpnui() {
         isActive(subId, srvId) {
             const a = this.state && this.state.active_server;
             return a && a.subscription_id === subId && a.server_id === srvId;
+        },
+
+        // Sort live servers by ascending ping; "down" (probed but failed)
+        // after them; untested last. Within each bucket, preserve the
+        // server-provided order so the picker doesn't reshuffle randomly
+        // before the user runs a test.
+        sortedServers(sub) {
+            const pings = (this.state && this.state.pings) || {};
+            const bucket = (id) => {
+                const p = pings[id];
+                if (!p) return 2;                  // untested
+                if (p.ms === null || p.ms === undefined) return 1;  // down
+                return 0;                          // live
+            };
+            return sub.servers.map((srv, i) => ({ srv, i }))
+                .sort((a, b) => {
+                    const ba = bucket(a.srv.id), bb = bucket(b.srv.id);
+                    if (ba !== bb) return ba - bb;
+                    if (ba === 0) {
+                        return pings[a.srv.id].ms - pings[b.srv.id].ms;
+                    }
+                    return a.i - b.i;
+                })
+                .map(x => x.srv);
+        },
+
+        pingLabel(serverId) {
+            const p = this.state && this.state.pings && this.state.pings[serverId];
+            if (!p) return "";
+            if (p.ms === null || p.ms === undefined) return "down";
+            return `${p.ms} ms`;
+        },
+
+        pingClass(serverId) {
+            const p = this.state && this.state.pings && this.state.pings[serverId];
+            if (!p) return "";
+            if (p.ms === null || p.ms === undefined) return "ping--down";
+            // Cutoffs tuned for VPN-from-residential-EU: <100 is great,
+            // 100-300 is usable, 300+ noticeably laggy for interactive use.
+            if (p.ms < 100) return "ping--fast";
+            if (p.ms < 300) return "ping--mid";
+            return "ping--slow";
         },
 
         sourcePreview(s) {
@@ -169,6 +215,25 @@ function vpnui() {
 
         async refreshSubscription(id) {
             await this._send("POST", `/api/subscriptions/${encodeURIComponent(id)}/refresh`);
+        },
+
+        async testSubscription(id) {
+            // Use a scoped flag instead of `busy`: TCP probing all servers
+            // takes ~2s and we don't want to disable the rest of the UI for
+            // the duration. The endpoint returns the updated snapshot.
+            this.testingSubId = id;
+            this.error = "";
+            try {
+                const data = await this._fetchJson(
+                    `/api/subscriptions/${encodeURIComponent(id)}/test`,
+                    { method: "POST" },
+                );
+                this.state = data;
+            } catch (e) {
+                this.error = e.message;
+            } finally {
+                this.testingSubId = "";
+            }
         },
 
         async renameSubscription(sub) {

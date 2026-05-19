@@ -237,6 +237,42 @@ async def test_patch_subscription_renames(setup):
     assert r.json()["subscriptions"][0]["label"] == "New"
 
 
+async def test_subscription_test_endpoint_returns_pings(setup, monkeypatch):
+    """POST /test calls into probe_servers and merges results into state.
+
+    We monkey-patch probe_servers in the routes module so the test stays
+    network-free; the routing/state plumbing is what we actually want to
+    verify here.
+    """
+    client, _state, _pipeline, routes_map = setup
+    routes_map.add("http://p.test/x", httpx.Response(200, text=SAMPLE_VLESS_BODY))
+    add = await client.post("/api/subscriptions", json={"label": "X", "source": "http://p.test/x"})
+    sub = add.json()["subscriptions"][0]
+    server_ids = [s["id"] for s in sub["servers"]]
+
+    from yonder.routes import subscriptions as subs_module
+
+    async def fake_probe(servers):
+        # Live first, down second — exercises both display paths.
+        return {server_ids[0]: 42, server_ids[1]: None}
+
+    monkeypatch.setattr(subs_module, "probe_servers", fake_probe)
+
+    r = await client.post(f"/api/subscriptions/{sub['id']}/test")
+    assert r.status_code == 200, r.text
+    pings = r.json()["pings"]
+    assert pings[server_ids[0]]["ms"] == 42
+    assert pings[server_ids[1]]["ms"] is None
+    # `at` must be a non-empty ISO timestamp for the UI to format.
+    assert pings[server_ids[0]]["at"]
+
+
+async def test_subscription_test_unknown_returns_404(setup):
+    client, *_ = setup
+    r = await client.post("/api/subscriptions/ghost-id/test")
+    assert r.status_code == 404
+
+
 # --- /api/server -----------------------------------------------------------
 
 

@@ -224,6 +224,16 @@ button.btn-secondary:hover:not(:disabled) {
     font-size: 0.75rem;
     word-break: break-all;
 }
+.server__ping {
+    font-size: 0.75rem;
+    margin-top: 0.35rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--muted);
+}
+.ping--fast { color: var(--accent); }
+.ping--mid  { color: var(--warn); }
+.ping--slow { color: var(--error); }
+.ping--down { color: var(--error); text-decoration: line-through; }
 
 /* Definition list */
 .kv {

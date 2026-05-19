@@ -66,6 +66,18 @@ class ApplyResult(BaseModel):
 DEFAULT_DOH_URL = "https://cloudflare-dns.com/dns-query"
 
 
+class PingResult(BaseModel):
+    """Latest TCP-probe result for a single server.
+
+    `ms` is None when the probe timed out or the connect failed — the UI
+    renders that as "down". `at` lets the UI show when the measurement
+    was taken (results don't auto-expire; they stay until re-tested).
+    """
+
+    ms: int | None
+    at: str
+
+
 class DnsState(BaseModel):
     """DoH-upstream state on the Keenetic router.
 
@@ -102,6 +114,10 @@ class Data(BaseModel):
     last_apply: ApplyResult | None = None
     applying: bool = False
     dns: DnsState = Field(default_factory=DnsState)
+    # Keyed by server.id (host:port). Stale entries (servers that no longer
+    # exist in any subscription) are harmless — the UI ignores keys it can't
+    # match to a current server tile.
+    pings: dict[str, PingResult] = Field(default_factory=dict)
 
 
 class State:
@@ -232,6 +248,20 @@ class State:
             if not still_present:
                 d.active_server = None
                 d.vpn_on = False
+
+        return await self.update(mutate)
+
+    async def merge_pings(self, results: dict[str, int | None]) -> Data:
+        """Record ping results, overwriting any prior entries for the same IDs.
+
+        Other entries are left untouched — a per-subscription test should not
+        wipe results from other subscriptions that were tested earlier.
+        """
+        at = now_iso()
+
+        def mutate(d: Data) -> None:
+            for server_id, ms in results.items():
+                d.pings[server_id] = PingResult(ms=ms, at=at)
 
         return await self.update(mutate)
 
