@@ -1,0 +1,61 @@
+[project]
+name = "yonder"
+version = "1.0.0"
+description = "VPN orchestrator for Keenetic routers"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+installer = [
+    "asyncssh>=2.14",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.15",
+]
+
+[project.scripts]
+yonderd = "yonder.__main__:main"
+yonder = "installer.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["yonder*", "installer*"]
+
+[tool.setuptools.package-data]
+"yonder" = ["static/*"]
+"installer" = ["resources/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["yonder", "installer", "tests"]
+
+[tool.ruff.lint]
+# E/W pycodestyle, F pyflakes (the must-haves), I isort (import order),
+# B flake8-bugbear (real-bug-class patterns), UP pyupgrade (Python 3.11+
+# syntax modernisation). Deliberately conservative — adding SIM, C4,
+# RUF, etc. is easy in a follow-up but they're stylistic and noisy
+# without a slow burn-in.
+select = ["E", "W", "F", "I", "B", "UP"]
+# Keep E501 off because our long comments / load-bearing-paragraph
+# docstrings would otherwise need awkward reflows.
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests use bare asserts, redefine names freely, and import fixtures
+# in ways ruff would flag in production code.
+"tests/*" = ["B011", "F401", "F811"]

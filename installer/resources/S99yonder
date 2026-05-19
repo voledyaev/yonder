@@ -1,0 +1,89 @@
+#!/bin/sh
+# Entware init.d script for yonder (Python).
+# Launches `python3 -m yonder` on port 8080 as a background daemon.
+
+PATH=/opt/sbin:/opt/bin:/opt/usr/sbin:/opt/usr/bin:/sbin:/bin:/usr/sbin:/usr/bin
+DESC="yonder"
+BASE=/opt/yonder
+PIDFILE=/var/run/yonder.pid
+DATA_DIR=$BASE/data
+LOGFILE=$DATA_DIR/yonderd.log
+
+# Yonder package source + vendored dependencies (installed via `pip install
+# --target` so we don't depend on system site-packages or a venv).
+export PYTHONPATH=$BASE:$BASE/lib
+
+export YONDER_BASE_DIR=$DATA_DIR
+export YONDER_LISTEN=0.0.0.0:8080
+export YONDER_XRAY_CONFIGS=/opt/etc/xray/configs
+export YONDER_KEENETIC_HOST=http://192.168.1.1
+export YONDER_KEENETIC_USER=admin
+
+# YONDER_KEENETIC_PW lives in yonder.env (chmod 600) so the admin password
+# never ends up in `ps -ef` or the public init script. The installer writes
+# it during deploy.
+[ -f "$BASE/yonder.env" ] && . "$BASE/yonder.env"
+
+is_running() {
+    [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null
+}
+
+start() {
+    if is_running; then
+        echo "$DESC already running (pid $(cat "$PIDFILE"))"
+        return 0
+    fi
+    mkdir -p "$DATA_DIR"
+    echo "Starting $DESC"
+    # Detach: stdin from /dev/null, stdout/stderr to log, background.
+    # busybox ash on Entware has no nohup; this is the equivalent.
+    python3 -m yonder </dev/null >>"$LOGFILE" 2>&1 &
+    echo $! > "$PIDFILE"
+    sleep 1
+    if is_running; then
+        echo "  started (pid $(cat "$PIDFILE"))"
+    else
+        echo "  failed; see $LOGFILE"
+        return 1
+    fi
+}
+
+stop() {
+    if is_running; then
+        PID=$(cat "$PIDFILE")
+        echo "Stopping $DESC (pid $PID)"
+        kill "$PID" 2>/dev/null
+        i=0
+        while is_running && [ $i -lt 10 ]; do
+            sleep 1
+            i=$((i+1))
+        done
+        is_running && kill -9 "$PID" 2>/dev/null
+    fi
+    rm -f "$PIDFILE"
+}
+
+restart() {
+    stop
+    start
+}
+
+status() {
+    if is_running; then
+        echo "$DESC is running (pid $(cat "$PIDFILE"))"
+        return 0
+    fi
+    echo "$DESC is not running"
+    return 1
+}
+
+case "$1" in
+    start)   start ;;
+    stop)    stop ;;
+    restart) restart ;;
+    status)  status ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 1
+        ;;
+esac

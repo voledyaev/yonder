@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Spans the pyproject `requires-python = ">=3.11"` floor and the
+        # current stable. New majors get added here when verified.
+        python-version: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install yonder + dev + installer deps
+        run: pip install -e ".[dev,installer]"
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Format check
+        run: ruff format --check .
+
+      - name: Run tests
+        # The opt-in live-router integration test stays skipped (its env
+        # vars aren't set in CI), so this only runs the 193 hermetic units.
+        run: pytest tests/ -v
