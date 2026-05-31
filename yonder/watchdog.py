@@ -7,11 +7,15 @@ Runs as a background coroutine inside the daemon. Every `interval` it:
 3. else calls services.restart() — XKeen re-establishes iptables tproxy
    and re-launches xray with the current config on disk
 
-Failure mode is important: while vpn_on is true but xray is dead, XKeen's
-iptables rules stay in place. Client traffic gets REDIRECT'd to port 1181
-(xray's tproxy) and finds nothing listening → connection refused. So during
-recovery, traffic fails closed — no leak to a direct route. That's the
-kill-switch property of the design.
+Failure mode is important and fails closed in both phases:
+
+* While xray is dead but XKeen's iptables rules still stand, client traffic
+  is REDIRECT'd to port 1181 (xray's tproxy) and finds nothing listening →
+  dropped. No leak.
+* During the recovery restart itself, XKeen flushes and rebuilds those
+  rules; that gap would otherwise leak to the direct route. `services.restart()`
+  brackets it with a fail-closed FORWARD DROP (see yonder.killswitch), so the
+  flush window drops egress instead of leaking.
 
 The watchdog does NOT go through the apply pipeline: a recovery restart
 doesn't need to re-write xray configs or re-toggle DoH, since the only thing

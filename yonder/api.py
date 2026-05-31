@@ -27,6 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from yonder import killswitch
 from yonder.apply import ApplyPipeline
 from yonder.deps import PipelineLike
 from yonder.fetch import DEFAULT_TIMEOUT_S
@@ -138,7 +139,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("router RCI: %s", kn_host)
 
     state = State(state_path)
-    services = XKeenService()
+    # Kill switch on in production: bracket every xkeen restart with a
+    # fail-closed FORWARD DROP so the rule-flush window can't leak to the ISP.
+    services = XKeenService(killswitch_enabled=True)
     keenetic = KeeneticClient(host=kn_host, login=kn_user, password=kn_pw)
     fetcher = httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_S)
     pipeline = ApplyPipeline(state, services, keenetic, configs_dir=xray_dir)
@@ -148,6 +151,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.yonder_pipeline = pipeline
     app.state.yonder_fetcher = fetcher
     app.state.yonder_xray_configs_dir = str(xray_dir)
+
+    # Clear any kill-switch DROP left over from a hard kill (SIGKILL skips the
+    # disengage `finally`) before anything else, so we never boot with egress
+    # silently blocked.
+    await killswitch.sweep()
 
     await pipeline.start()
     await watchdog.start()

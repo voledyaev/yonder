@@ -11,6 +11,8 @@ import asyncio
 import subprocess
 from pathlib import Path
 
+from yonder import killswitch
+
 # Path to the xkeen wrapper script installed by XKeen's own installer.
 XKEEN_BIN = "/opt/sbin/xkeen"
 
@@ -28,9 +30,14 @@ class XKeenService:
         self,
         bin_path: str | Path = XKEEN_BIN,
         timeout_s: float = DEFAULT_TIMEOUT_S,
+        *,
+        killswitch_enabled: bool = False,
     ):
         self._bin = Path(bin_path)
         self._timeout = timeout_s
+        # Off by default so unit tests (which point at a fake xkeen script)
+        # never touch real iptables. Production turns it on in the lifespan.
+        self._killswitch_enabled = killswitch_enabled
 
     def installed(self) -> bool:
         """True when the xkeen binary exists as a regular file.
@@ -40,13 +47,37 @@ class XKeenService:
         return self._bin.is_file()
 
     async def start(self) -> tuple[bool, str]:
-        return await self._invoke("-start")
+        # -start sets up TPROXY rules from scratch; guard the gap.
+        return await self._guarded("-start")
 
     async def stop(self) -> tuple[bool, str]:
+        # Deliberately NOT guarded: -stop is the VPN-off path, where traffic
+        # going direct is the intended outcome — a kill switch there would
+        # just block the user's internet after they asked to turn VPN off.
         return await self._invoke("-stop")
 
     async def restart(self) -> tuple[bool, str]:
-        return await self._invoke("-restart")
+        return await self._guarded("-restart")
+
+    async def _guarded(self, arg: str) -> tuple[bool, str]:
+        """Run an xkeen action that flushes+rebuilds TPROXY rules, bracketed
+        by a fail-closed FORWARD DROP so the flush window can't leak.
+
+        The DROP is held only for the duration of the xkeen subprocess: when
+        `xkeen -restart` returns, rules are back and xray is up. If xray is
+        still binding its socket, the freshly-restored TPROXY redirect drops
+        packets at a dead socket — still fail-closed — so removing our rule
+        on return is safe.
+        """
+        if not self.installed() or not self._killswitch_enabled:
+            return await self._invoke(arg)
+        wan = await killswitch.detect_wan()
+        engaged = await killswitch.engage(wan) if wan else False
+        try:
+            return await self._invoke(arg)
+        finally:
+            if engaged:
+                await killswitch.disengage(wan)
 
     async def is_running(self) -> bool:
         """Best-effort check: is xray actually running right now?
