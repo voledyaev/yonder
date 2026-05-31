@@ -19,6 +19,12 @@ GEO_DIR = "/opt/etc/sing-box"
 GEOIP_RU = "geoip-ru"
 GEOSITE_RU = "geosite-ru"
 
+# In user-supplied rules, `outbound: "proxy"` is a stable alias for "send this
+# through the VPN" — rewritten to the real selector tag at build time. Lets a
+# routing config stay portable and readable without baking in yonder's
+# internal selector tag name.
+PROXY_ALIAS = "proxy"
+
 
 def rule_set_defs() -> list[dict[str, Any]]:
     """Local binary rule-set declarations referenced by the route rules."""
@@ -73,7 +79,8 @@ def build_route(
         {"action": "resolve"},
         {"ip_is_private": True, "outbound": "direct"},
     ]
-    rules.extend(user_rules if user_rules else default_route_rules())
+    chosen = user_rules if user_rules else default_route_rules()
+    rules.extend(_resolve_proxy_alias(rule, selector_tag) for rule in chosen)
 
     return {
         "rules": rules,
@@ -81,3 +88,10 @@ def build_route(
         "final": selector_tag,
         "auto_detect_interface": True,
     }
+
+
+def _resolve_proxy_alias(rule: dict[str, Any], selector_tag: str) -> dict[str, Any]:
+    """Rewrite `outbound: "proxy"` to the real selector tag; pass through else."""
+    if rule.get("outbound") == PROXY_ALIAS:
+        return {**rule, "outbound": selector_tag}
+    return rule

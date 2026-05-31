@@ -177,6 +177,18 @@ def test_default_route_rules_are_native():
         assert "type" not in rule
 
 
+def test_proxy_alias_rewritten_to_selector():
+    user = [
+        {"domain_suffix": ["meduza.io"], "outbound": "proxy"},
+        {"domain_suffix": [".ru"], "outbound": "direct"},
+    ]
+    r = build_route(user, SELECTOR_TAG)
+    rewritten = next(rule for rule in r["rules"] if rule.get("domain_suffix") == ["meduza.io"])
+    assert rewritten["outbound"] == SELECTOR_TAG  # "proxy" → selector
+    passthrough = next(rule for rule in r["rules"] if rule.get("domain_suffix") == [".ru"])
+    assert passthrough["outbound"] == "direct"  # untouched
+
+
 # --- dns --------------------------------------------------------------------
 
 
