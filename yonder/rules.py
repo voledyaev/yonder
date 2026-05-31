@@ -105,3 +105,128 @@ def _present_and_nonempty(v: Any) -> bool:
     if isinstance(v, (list, dict)) and len(v) == 0:
         return False
     return True
+
+
+# --- sing-box rules (migration target) -------------------------------------
+#
+# The xray validator above stays for the xkeen data plane until it's retired.
+# On the sing-box data plane, rules are sing-box-native: yonder's generated
+# config prepends sniff + resolve + private-direct and sets `final` to the
+# selector, so a user file carries only the selective logic — which
+# destinations go direct/block and which RU resources to override to proxy.
+# `proxy` is an alias the route builder rewrites to the selector tag.
+
+# Outbound targets a user rule may name on the sing-box plane.
+_SB_VALID_OUTBOUNDS = {"proxy", "direct", "block"}
+
+# sing-box rule matchers we accept; a route rule must carry at least one.
+_SB_MATCH_FIELDS = (
+    "domain",
+    "domain_suffix",
+    "domain_keyword",
+    "domain_regex",
+    "ip_cidr",
+    "ip_is_private",
+    "source_ip_cidr",
+    "source_ip_is_private",
+    "port",
+    "port_range",
+    "source_port",
+    "network",
+    "protocol",
+    "rule_set",
+    "process_name",
+    "package_name",
+    "clash_mode",
+)
+
+# Standalone (non-route) actions allowed without an outbound/matcher.
+_SB_VALID_ACTIONS = {"sniff", "resolve", "reject", "hijack-dns", "route"}
+
+# Dead giveaways of an xray rule pasted by mistake — fail with a pointer.
+_XRAY_MARKERS = ("type", "outboundTag")
+
+
+def parse_singbox_rules(raw: bytes | str) -> list[dict[str, Any]]:
+    """Parse, strip `_comment`s from, and validate a sing-box rules document.
+
+    Accepted top-level shapes: {"route": {"rules": [...]}}, {"rules": [...]},
+    or a bare [...]. Returns the cleaned rule list ready for `route.rules`.
+
+    sing-box rejects unknown fields, so `_comment` keys (which xray tolerated)
+    are stripped recursively here.
+    """
+    import json
+
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+    try:
+        top = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RulesParseError(f"not valid JSON: {exc.msg}") from exc
+
+    rules_raw = _sb_extract_rules_array(top)
+    if not rules_raw:
+        raise RulesParseError("`rules` is empty")
+
+    out: list[dict[str, Any]] = []
+    for i, ri in enumerate(rules_raw):
+        if not isinstance(ri, dict):
+            raise RulesParseError(f"rule[{i}] is not an object")
+        rule = _sb_strip_comments(ri)
+        _sb_validate_rule(i, rule)
+        out.append(rule)
+    return out
+
+
+def _sb_extract_rules_array(top: Any) -> list[Any]:
+    if isinstance(top, list):
+        return top
+    if isinstance(top, dict):
+        route = top.get("route")
+        if isinstance(route, dict) and isinstance(route.get("rules"), list):
+            return route["rules"]
+        if isinstance(top.get("rules"), list):
+            return top["rules"]
+        raise RulesParseError(
+            'expected {"route": {"rules": [...]}} or {"rules": [...]} or a bare [...] array'
+        )
+    raise RulesParseError("expected JSON object or array at the top level")
+
+
+def _sb_validate_rule(i: int, rule: dict[str, Any]) -> None:
+    for marker in _XRAY_MARKERS:
+        if marker in rule:
+            raise RulesParseError(
+                f"rule[{i}] looks like an xray rule (has {marker!r}); this is "
+                "sing-box now — use domain_suffix/ip_cidr/rule_set + "
+                "outbound: proxy|direct|block"
+            )
+
+    # Standalone action rule (sniff/resolve/...) needs no outbound/matcher.
+    action = rule.get("action")
+    if action is not None and "outbound" not in rule:
+        if action not in _SB_VALID_ACTIONS:
+            raise RulesParseError(f"rule[{i}].action {action!r} is not a known sing-box action")
+        return
+
+    if "outbound" not in rule:
+        raise RulesParseError(f"rule[{i}].outbound is missing")
+    tag = rule["outbound"]
+    if tag not in _SB_VALID_OUTBOUNDS:
+        raise RulesParseError(
+            f"rule[{i}].outbound must be one of {sorted(_SB_VALID_OUTBOUNDS)}; got {tag!r}"
+        )
+    if not any(_present_and_nonempty(rule.get(f)) for f in _SB_MATCH_FIELDS):
+        raise RulesParseError(
+            f"rule[{i}] has no matcher — need at least one of {list(_SB_MATCH_FIELDS[:5])}…"
+        )
+
+
+def _sb_strip_comments(obj: Any) -> Any:
+    """Recursively drop `_comment` keys (sing-box rejects unknown fields)."""
+    if isinstance(obj, dict):
+        return {k: _sb_strip_comments(v) for k, v in obj.items() if k != "_comment"}
+    if isinstance(obj, list):
+        return [_sb_strip_comments(x) for x in obj]
+    return obj
