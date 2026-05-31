@@ -1,27 +1,15 @@
 #!/bin/sh
-# Entware init.d script for yonder (Python).
-# Launches `python3 -m yonder` on port 8080 as a background daemon.
+# Entware init.d script for sing-box (yonder's data plane).
+# Runs `sing-box run` against the config yonder generates. yonder drives the
+# lifecycle (it calls `restart` after writing a new config); this script also
+# handles boot autostart and is a no-op until yonder has written a config.
 
 PATH=/opt/sbin:/opt/bin:/opt/usr/sbin:/opt/usr/bin:/sbin:/bin:/usr/sbin:/usr/bin
-DESC="yonder"
-BASE=/opt/yonder
-PIDFILE=/var/run/yonder.pid
-DATA_DIR=$BASE/data
-LOGFILE=$DATA_DIR/yonderd.log
-
-# Yonder package source + vendored dependencies (installed via `pip install
-# --target` so we don't depend on system site-packages or a venv).
-export PYTHONPATH=$BASE:$BASE/lib
-
-export YONDER_BASE_DIR=$DATA_DIR
-export YONDER_LISTEN=0.0.0.0:8080
-
-# sing-box data plane: yonder generates this config and drives sing-box via
-# the Clash API. No router credentials needed — DNS/DoH lives inside sing-box,
-# so the Keenetic RCI password (and yonder.env) is gone.
-export YONDER_DATA_PLANE=singbox
-export YONDER_SINGBOX_CONFIG=/opt/etc/sing-box/config.json
-export YONDER_CLASH_API=http://127.0.0.1:9090
+DESC="sing-box"
+BIN=/opt/sbin/sing-box
+CONFIG=/opt/etc/sing-box/config.json
+PIDFILE=/var/run/sing-box.pid
+LOGFILE=/opt/etc/sing-box/sing-box.log
 
 is_running() {
     [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null
@@ -32,11 +20,16 @@ start() {
         echo "$DESC already running (pid $(cat "$PIDFILE"))"
         return 0
     fi
-    mkdir -p "$DATA_DIR"
+    if [ ! -f "$CONFIG" ]; then
+        # yonder hasn't generated a config yet — nothing to run. yonder will
+        # call `restart` once it writes one, so this is not an error at boot.
+        echo "$DESC: no config at $CONFIG yet; skipping (yonder will start it)"
+        return 0
+    fi
     echo "Starting $DESC"
-    # Detach: stdin from /dev/null, stdout/stderr to log, background.
-    # busybox ash on Entware has no nohup; this is the equivalent.
-    python3 -m yonder </dev/null >>"$LOGFILE" 2>&1 &
+    # Detach: stdin from /dev/null, output to log, background. busybox ash on
+    # Entware has no nohup; this is the equivalent.
+    "$BIN" run -c "$CONFIG" </dev/null >>"$LOGFILE" 2>&1 &
     echo $! > "$PIDFILE"
     sleep 1
     if is_running; then
@@ -59,6 +52,8 @@ stop() {
         done
         is_running && kill -9 "$PID" 2>/dev/null
     fi
+    # sing-box removes its own tun + auto_route rules on a clean exit; nothing
+    # else to tear down here.
     rm -f "$PIDFILE"
 }
 

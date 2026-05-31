@@ -26,6 +26,11 @@ def _init_script_bytes() -> bytes:
     return resources.files("installer.resources").joinpath("S99yonder").read_bytes()
 
 
+def _singbox_init_bytes() -> bytes:
+    """Read the embedded S99singbox init script."""
+    return resources.files("installer.resources").joinpath("S99singbox").read_bytes()
+
+
 async def do_probe(host: str, user: str, password: str) -> None:
     print(f"\nProbing {user}@{host}...")
     if await is_entware_ready(host, user, password):
@@ -75,14 +80,15 @@ async def do_install(host: str, user: str, password: str) -> None:
     shell = await EntwareShell.connect(host, user, password)
     cli = await KeeneticCLI.connect(host, user, password)
     try:
+        arch = await steps.detect_arch(cli)
         print("\n[3/4] Installing dependencies and deploying app...")
-        await steps.install_xkeen(shell)
-        await steps.free_port_443(cli)
+        await steps.install_singbox(shell, arch)
+        await steps.install_geo_rulesets(shell)
+        await steps.install_singbox_init(shell, _singbox_init_bytes())
         await steps.install_python(shell)
         await steps.install_pip_deps(shell)
         await steps.deploy_yonder_source(shell, _local_yonder_dir())
         await steps.install_init_script(shell, _init_script_bytes())
-        await steps.write_env_file(shell, password)
         await steps.open_firewall_port(shell)
 
         print("\n[4/4] Starting daemon...")
@@ -134,41 +140,29 @@ async def do_uninstall(host: str, user: str, password: str) -> None:
     if not await is_entware_ready(host, user, password):
         fail("Entware shell not reachable — nothing to uninstall.")
     shell = await EntwareShell.connect(host, user, password)
-    cli: KeeneticCLI | None = None
     try:
-        # Read state.json BEFORE we kill anything — we need active_url to know
-        # whether to clean a DoH upstream off the router.
-        active_doh_url = await steps.read_active_doh_url(shell)
-
         # Order matters:
-        # 1. Stop daemon first so it doesn't fight back (e.g. watchdog
-        #    restarting xkeen after we stop it).
-        # 2. Stop xkeen so xray drops the in-memory VLESS credentials and
-        #    tproxy iptables disappear before we deauth the rest.
-        # 3. Clean up router-side state the daemon would have on toggle-off:
-        #    DoH upstream that was set while VPN was on at uninstall time.
-        # 4. Scrub xray configs so leftover 04_outbounds.json doesn't leak
-        #    the user's VLESS UUID + server credentials.
-        # 5. Remove our own files + firewall rule.
+        # 1. Stop the daemon first so its watchdog doesn't restart sing-box
+        #    after we stop it.
+        # 2. Stop sing-box so the tun + auto_route rules disappear and the
+        #    in-memory VLESS credentials are dropped.
+        # 3. Scrub config.json so leftover servers don't leak the user's
+        #    VLESS UUIDs + servers.
+        # 4. Remove our own files + init scripts + firewall rule.
+        #
+        # No Keenetic CLI needed: with the sing-box plane there's no router-side
+        # DoH upstream to clean and no HTTPS-port move to revert — DNS lives
+        # inside sing-box and tun needs no port freed.
         await steps.stop_daemon(shell)
-        await steps.stop_xkeen(shell)
-        # One Keenetic CLI session covers both DoH cleanup (only if VPN was
-        # on at uninstall) and the HTTPS port revert (always, if it was
-        # moved). Open it lazily to avoid a needless session when neither
-        # applies (e.g. xkeen never installed).
-        cli = await KeeneticCLI.connect(host, user, password)
-        if active_doh_url:
-            await steps.clear_router_doh_upstream(cli, active_doh_url)
-        await steps.restore_port_443(cli)
-        await steps.scrub_xray_configs(shell)
+        await steps.stop_singbox(shell)
+        await steps.scrub_singbox_config(shell)
         await steps.remove_init_script(shell)
+        await steps.remove_singbox_init(shell)
         await steps.remove_app(shell)
         await steps.close_firewall_port(shell)
         ok("uninstalled")
     finally:
-        if cli is not None:
-            await cli.close()
         await shell.close()
-    print("\n  Note: Entware itself is left in place. xkeen + xray binaries")
-    print("  remain (they survive a re-install). xray configs are reset to")
-    print("  safe defaults — no VLESS credentials left on disk.")
+    print("\n  Note: Entware itself is left in place. The sing-box binary and")
+    print("  geo rule-sets remain (they survive a re-install). config.json is")
+    print("  reset to safe defaults — no VLESS credentials left on disk.")

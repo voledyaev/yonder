@@ -3,10 +3,12 @@
 Each function is one logical operation against the router. They're called
 from flows.py in a fixed order; calling out of order is undefined.
 
-DoH-upstream configuration is intentionally NOT here anymore — the daemon
-manages it at runtime via RCI synchronized with vpn_on. The installer's job
-is just to ensure the `dns-https` firmware component exists so the runtime
-API works.
+The data plane is sing-box: the installer downloads the sing-box binary + RU
+geo rule-sets and registers an init script; yonder generates config.json and
+drives it via the Clash API at runtime. DNS/DoH lives inside sing-box, so the
+installer needs no router-side DoH setup (and the daemon needs no router
+credentials). The xkeen install/uninstall steps remain below for rollback
+during the migration and are scheduled for removal.
 """
 
 from __future__ import annotations
@@ -69,9 +71,9 @@ XKEEN_TARBALL_URL = "https://github.com/jameszeroX/XKeen/releases/latest/downloa
 REQUIRED_COMPONENTS = {
     "opkg",  # OPKG package manager
     "ext",  # ext2/3/4 filesystem support
-    "opkg-kmod-netfilter",  # iptables modules for VPN routing
+    "opkg-kmod-netfilter",  # iptables modules (tun/auto_route still uses them)
     "opkg-kmod-netfilter-addons",
-    "dns-https",  # DoH support — runtime API needs this
+    # No "dns-https": the sing-box plane does DNS/DoH itself, not via the router.
 }
 
 MIN_USB_FREE_MB = 200
@@ -82,6 +84,29 @@ PIP_PACKAGES = (
     "uvicorn>=0.27,<1",
     "httpx>=0.27,<1",
     "pydantic>=2,<3",
+)
+
+# --- sing-box data plane --------------------------------------------------
+#
+# Pinned for reproducibility (asset names embed the version). musl builds are
+# mandatory: Entware is musl-based and the plain/glibc sing-box binary fails
+# to exec (missing ELF interpreter).
+SINGBOX_VERSION = "1.13.12"
+# Keenetic arch (from detect_arch) → sing-box release GOARCH.
+SINGBOX_GOARCH = {"aarch64": "arm64", "armv7": "armv7", "mipsel": "mipsle"}
+SINGBOX_URL_TMPL = (
+    "https://github.com/SagerNet/sing-box/releases/download/"
+    "v{ver}/sing-box-{ver}-linux-{goarch}-musl.tar.gz"
+)
+SINGBOX_BIN = "/opt/sbin/sing-box"
+SINGBOX_DIR = "/opt/etc/sing-box"
+SINGBOX_CONFIG = "/opt/etc/sing-box/config.json"
+SINGBOX_INIT = "/opt/etc/init.d/S99singbox"
+# RU geo rule-sets (sing-box .srs) from the rule-set branches — the analogue
+# of the v2fly geoip.dat/geosite.dat, but native to sing-box.
+SINGBOX_GEOIP_URL = "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-ru.srs"
+SINGBOX_GEOSITE_URL = (
+    "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ru.srs"
 )
 
 
@@ -312,6 +337,77 @@ async def _ensure_geo_dats(shell: EntwareShell) -> None:
     ok("geofiles installed")
 
 
+async def install_singbox(shell: EntwareShell, arch: str) -> None:
+    """Download the pinned sing-box (musl) binary for `arch` → /opt/sbin/sing-box.
+
+    Idempotent: if the right version is already installed, does nothing.
+    """
+    rc, out, _ = await shell.run(
+        f"{SINGBOX_BIN} version 2>/dev/null | head -1", check=False, timeout=10.0
+    )
+    if rc == 0 and SINGBOX_VERSION in out:
+        ok(f"sing-box {SINGBOX_VERSION} already installed")
+        return
+
+    goarch = SINGBOX_GOARCH.get(arch)
+    if goarch is None:
+        fail(f"no sing-box build mapping for arch {arch!r} (supported: {sorted(SINGBOX_GOARCH)})")
+    url = SINGBOX_URL_TMPL.format(ver=SINGBOX_VERSION, goarch=goarch)
+
+    info("installing curl + tar (sing-box download needs them)")
+    await shell.run("opkg install curl tar", check=True, timeout=180.0)
+    info(f"downloading sing-box {SINGBOX_VERSION} ({goarch}-musl, ~22 MB)")
+    await shell.run(
+        "cd /tmp && rm -rf sb_dl && mkdir sb_dl && cd sb_dl && "
+        f"curl -fL --connect-timeout 15 -m 180 -o sb.tar.gz {url} && "
+        "tar -xzf sb.tar.gz && "
+        f'BIN=$(find . -name sing-box -type f | head -1) && cp "$BIN" {SINGBOX_BIN} && '
+        f"chmod +x {SINGBOX_BIN} && cd /tmp && rm -rf sb_dl",
+        check=True,
+        timeout=240.0,
+    )
+    rc, out, _ = await shell.run(f"{SINGBOX_BIN} version 2>&1 | head -1", check=False, timeout=10.0)
+    if rc != 0 or SINGBOX_VERSION not in out:
+        fail(
+            f"sing-box install verification failed: {out.strip() or '(no output)'}.\n"
+            "  Common causes: GitHub unreachable, or wrong arch/libc build."
+        )
+    ok(f"sing-box installed ({out.strip()})")
+
+
+async def install_geo_rulesets(shell: EntwareShell) -> None:
+    """Download the RU geo rule-sets (.srs) sing-box's routing references.
+
+    Idempotent: skips files already present and non-empty.
+    """
+    await shell.run(f"mkdir -p {SINGBOX_DIR}", check=True, timeout=10.0)
+    targets = [
+        (SINGBOX_GEOIP_URL, f"{SINGBOX_DIR}/geoip-ru.srs"),
+        (SINGBOX_GEOSITE_URL, f"{SINGBOX_DIR}/geosite-ru.srs"),
+    ]
+    rc, _, _ = await shell.run(
+        " && ".join(f"test -s {dest}" for _, dest in targets), check=False, timeout=5.0
+    )
+    if rc == 0:
+        ok("sing-box geo rule-sets already present")
+        return
+    info("downloading sing-box RU geo rule-sets (.srs)")
+    for url, dest in targets:
+        await shell.run(
+            f"curl -fL --connect-timeout 15 -m 120 -o {dest} {url} && test -s {dest}",
+            check=True,
+            timeout=180.0,
+        )
+    ok("sing-box geo rule-sets installed")
+
+
+async def install_singbox_init(shell: EntwareShell, init_script_bytes: bytes) -> None:
+    info(f"installing sing-box init script → {SINGBOX_INIT}")
+    await shell.run("mkdir -p /opt/etc/init.d", check=True, timeout=10.0)
+    await shell.upload_bytes(init_script_bytes, SINGBOX_INIT, mode=0o755)
+    ok("sing-box init script installed")
+
+
 async def free_port_443(cli: KeeneticCLI) -> None:
     """Move Keenetic's HTTPS admin from 443 to 8443 so xkeen's tproxy doesn't
     conflict. After this `https://router/` becomes `https://router:8443/`.
@@ -499,6 +595,42 @@ async def stop_xkeen(shell: EntwareShell) -> None:
         return  # xkeen not installed; nothing to stop
     info("stopping xkeen + xray (so credentials stop serving traffic)")
     await shell.run("/opt/sbin/xkeen -stop", check=False, timeout=30.0)
+
+
+async def stop_singbox(shell: EntwareShell) -> None:
+    """Stop sing-box (drops the tun + auto_route rules and the in-memory VLESS
+    credentials). No-op if its init script isn't present."""
+    rc, _, _ = await shell.run(f"test -x {SINGBOX_INIT}", check=False, timeout=5.0)
+    if rc != 0:
+        return
+    info("stopping sing-box (so credentials stop serving traffic)")
+    await shell.run(f"{SINGBOX_INIT} stop", check=False, timeout=30.0)
+
+
+async def scrub_singbox_config(shell: EntwareShell) -> None:
+    """Overwrite the sing-box config with a credential-free one.
+
+    Without this, uninstall would leave the user's VLESS UUIDs + servers in
+    config.json. Reuses yonder's own generator with empty state → a config
+    with no vless outbounds (selector points only at `direct`).
+    """
+    rc, _, _ = await shell.run(f"test -f {SINGBOX_CONFIG}", check=False, timeout=5.0)
+    if rc != 0:
+        return  # never installed; nothing to scrub
+    info("scrubbing sing-box config (removing VLESS credentials)")
+    from yonder.singbox.config import build_config
+    from yonder.singbox.service import write_config
+    from yonder.state import Data
+
+    with tempfile.TemporaryDirectory() as tmp:
+        local = Path(tmp) / "config.json"
+        write_config(build_config(Data()), local)
+        await shell.upload_bytes(local.read_bytes(), SINGBOX_CONFIG, mode=0o600)
+
+
+async def remove_singbox_init(shell: EntwareShell) -> None:
+    info("removing sing-box init script")
+    await shell.run(f"rm -f {SINGBOX_INIT}", check=False, timeout=10.0)
 
 
 async def clear_router_doh_upstream(cli: KeeneticCLI, url: str) -> None:
