@@ -56,10 +56,12 @@ def build_dns(doh_url: str, selector_tag: str) -> dict[str, Any]:
         "servers": [
             proxy_server,
             {
+                # No `detour: direct` — sing-box 1.12+ rejects detouring to a
+                # plain direct outbound ("makes no sense"). The query to a RU
+                # resolver routes direct anyway via the geoip-ru rule.
                 "type": "udp",
                 "tag": DNS_DIRECT,
                 "server": RU_DIRECT_RESOLVER,
-                "detour": "direct",
             },
         ],
         "rules": [

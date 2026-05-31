@@ -30,7 +30,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from yonder import killswitch
 from yonder.apply import ApplyPipeline
-from yonder.dataplane import SingBoxDataPlane, XkeenDataPlane
+from yonder.dataplane import SingBoxDataPlane, SingBoxWatchdogDeps, XkeenDataPlane
 from yonder.deps import PipelineLike
 from yonder.fetch import DEFAULT_TIMEOUT_S
 from yonder.keenetic import KeeneticClient
@@ -150,7 +150,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         clash_http = httpx.AsyncClient(timeout=10.0)
         clash = ClashClient(clash_http, base_url=clash_url)
         data_plane = SingBoxDataPlane(service, clash, config_path=sb_config)
-        watchdog = Watchdog(StateServicesDeps(state, service))
+        watchdog = Watchdog(SingBoxWatchdogDeps(state, service, clash))
         closers.append(clash_http.aclose)
     else:
         kn_host = os.environ.get("YONDER_KEENETIC_HOST") or "http://192.168.1.1"

@@ -163,6 +163,31 @@ class SingBoxDataPlane:
         return ok, ("" if ok else f"sing-box: {msg}")
 
 
+class SingBoxWatchdogDeps:
+    """Watchdog deps for the sing-box plane: a process that's alive but whose
+    Clash API is unresponsive counts as down, so a wedged sing-box (tun up,
+    control plane stuck) gets recovered too — not just an outright crash."""
+
+    def __init__(self, state: State, service: SingBoxService, clash: ClashClient):
+        self._state = state
+        self._service = service
+        self._clash = clash
+
+    def vpn_on(self) -> bool:
+        return self._state.snapshot().vpn_on
+
+    def applying(self) -> bool:
+        return self._state.snapshot().applying
+
+    async def is_running(self) -> bool:
+        if not await self._service.is_running():
+            return False
+        return await self._clash.healthy()
+
+    async def restart(self) -> tuple[bool, str]:
+        return await self._service.restart()
+
+
 def _structural_key(cfg: dict[str, Any]) -> str:
     """Stable fingerprint of everything that requires a reload.
 

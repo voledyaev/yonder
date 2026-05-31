@@ -170,9 +170,56 @@ async def test_reload_failure_reported_and_forces_next_reload(tmp_path):
     assert svc.reloads == 2
 
 
+async def test_watchdog_deps_wedged_when_clash_unhealthy(tmp_path):
+    from yonder.dataplane import SingBoxWatchdogDeps
+    from yonder.state import State
+
+    state = State(tmp_path / "state.json")
+
+    class Svc:
+        async def is_running(self):
+            return True
+
+        async def restart(self):
+            return (True, "")
+
+    class HealthyClash:
+        async def healthy(self):
+            return True
+
+    class WedgedClash:
+        async def healthy(self):
+            return False
+
+    assert await SingBoxWatchdogDeps(state, Svc(), HealthyClash()).is_running() is True
+    # process up but Clash unresponsive → treated as down (triggers recovery)
+    assert await SingBoxWatchdogDeps(state, Svc(), WedgedClash()).is_running() is False
+
+
+async def test_watchdog_deps_down_when_process_dead(tmp_path):
+    from yonder.dataplane import SingBoxWatchdogDeps
+    from yonder.state import State
+
+    class DeadSvc:
+        async def is_running(self):
+            return False
+
+        async def restart(self):
+            return (True, "")
+
+    class Clash:
+        async def healthy(self):
+            raise AssertionError("should not be checked when process is dead")
+
+    deps = SingBoxWatchdogDeps(State(tmp_path / "s.json"), DeadSvc(), Clash())
+    assert await deps.is_running() is False  # short-circuits before clash
+
+
 def test_parse_rules_uses_singbox_parser():
+    from yonder.rules import RulesParseError
+
     plane = SingBoxDataPlane(FakeService(), FakeClash(), config_path="/tmp/x")
     rules = plane.parse_rules(b'[{"domain_suffix": [".ru"], "outbound": "direct"}]')
     assert rules == [{"domain_suffix": [".ru"], "outbound": "direct"}]
-    with pytest.raises(Exception):
+    with pytest.raises(RulesParseError):
         plane.parse_rules(b'[{"type": "field", "outboundTag": "direct", "ip": ["10.0.0.0/8"]}]')

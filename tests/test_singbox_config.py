@@ -200,7 +200,9 @@ def test_dns_two_resolvers_with_detours():
     assert by_tag[DNS_PROXY]["path"] == "/dns-query"
     assert by_tag[DNS_PROXY]["detour"] == SELECTOR_TAG  # foreign DNS over proxy
     assert by_tag[DNS_DIRECT]["type"] == "udp"
-    assert by_tag[DNS_DIRECT]["detour"] == "direct"  # RU DNS direct, no leak
+    # No detour — sing-box rejects detouring to a plain direct outbound; the
+    # RU resolver routes direct via geoip-ru anyway.
+    assert "detour" not in by_tag[DNS_DIRECT]
     assert dns["final"] == DNS_PROXY
     # RU domains resolve via the direct resolver.
     assert {"rule_set": [GEOSITE_RU], "server": DNS_DIRECT} in dns["rules"]
