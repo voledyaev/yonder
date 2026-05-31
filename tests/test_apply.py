@@ -2,6 +2,7 @@ import asyncio
 
 import pytest
 from yonder.apply import ApplyPipeline
+from yonder.dataplane import XkeenDataPlane
 from yonder.keenetic import DohUpstream
 from yonder.state import (
     DEFAULT_DOH_URL,
@@ -86,9 +87,14 @@ async def state_with_active(tmp_path, vpn_on=True) -> tuple[State, str]:
     return s, sub_id
 
 
+def _xkeen_pipeline(state, services, router, configs_dir) -> ApplyPipeline:
+    plane = XkeenDataPlane(state, services, router, configs_dir=configs_dir)
+    return ApplyPipeline(state, plane)
+
+
 async def run_one_apply(state, services, router, configs_dir) -> None:
     """Start pipeline, signal one apply, wait for completion, stop."""
-    p = ApplyPipeline(state, services, router, configs_dir=configs_dir)
+    p = _xkeen_pipeline(state, services, router, configs_dir)
     await p.start()
     p.signal()
     # Wait until last_apply is recorded — bounded retry loop.
@@ -206,7 +212,7 @@ async def test_rapid_signals_coalesce(tmp_path):
     router = FakeRouter()
     services = FakeServices()
 
-    p = ApplyPipeline(state, services, router, configs_dir=tmp_path / "configs")
+    p = _xkeen_pipeline(state, services, router, tmp_path / "configs")
     await p.start()
 
     # 10 signals fired before the worker can start any iteration.

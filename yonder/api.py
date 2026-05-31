@@ -14,6 +14,7 @@ Two construction modes share `create_app()`:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from collections.abc import AsyncIterator
@@ -29,11 +30,14 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from yonder import killswitch
 from yonder.apply import ApplyPipeline
+from yonder.dataplane import SingBoxDataPlane, XkeenDataPlane
 from yonder.deps import PipelineLike
 from yonder.fetch import DEFAULT_TIMEOUT_S
 from yonder.keenetic import KeeneticClient
 from yonder.routes import dns, meta, rules, server, subscriptions, vpn
 from yonder.services import XKeenService
+from yonder.singbox.clash import ClashClient
+from yonder.singbox.service import SINGBOX_CONFIG, SingBoxService
 from yonder.state import State
 from yonder.watchdog import StateServicesDeps, Watchdog
 from yonder.xray import XKEEN_CONFIGS_DIR
@@ -125,31 +129,50 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     if not base_dir:
         raise RuntimeError("YONDER_BASE_DIR is not set; refusing to guess where to put state.json")
     xray_dir = os.environ.get("YONDER_XRAY_CONFIGS") or XKEEN_CONFIGS_DIR
-    kn_host = os.environ.get("YONDER_KEENETIC_HOST") or "http://192.168.1.1"
-    kn_user = os.environ.get("YONDER_KEENETIC_USER") or "admin"
-    kn_pw = os.environ.get("YONDER_KEENETIC_PW", "")
-    if not kn_pw:
-        logger.warning("YONDER_KEENETIC_PW is empty — DoH apply/restore will fail until set")
+    plane = (os.environ.get("YONDER_DATA_PLANE") or "xkeen").lower()
 
     base = Path(base_dir)
     base.mkdir(parents=True, exist_ok=True)
     state_path = base / "state.json"
     logger.info("state path: %s", state_path)
-    logger.info("xray configs: %s", xray_dir)
-    logger.info("router RCI: %s", kn_host)
+    logger.info("data plane: %s", plane)
 
     state = State(state_path)
-    # Kill switch on in production: bracket every xkeen restart with a
-    # fail-closed FORWARD DROP so the rule-flush window can't leak to the ISP.
-    services = XKeenService(killswitch_enabled=True)
-    keenetic = KeeneticClient(host=kn_host, login=kn_user, password=kn_pw)
     fetcher = httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_S)
-    pipeline = ApplyPipeline(state, services, keenetic, configs_dir=xray_dir)
-    watchdog = Watchdog(StateServicesDeps(state, services))
+    # Teardown closures, accumulated per data plane.
+    closers: list = [fetcher.aclose]
+
+    if plane == "singbox":
+        sb_config = os.environ.get("YONDER_SINGBOX_CONFIG") or SINGBOX_CONFIG
+        clash_url = os.environ.get("YONDER_CLASH_API") or "http://127.0.0.1:9090"
+        logger.info("sing-box config: %s; clash api: %s", sb_config, clash_url)
+        service = SingBoxService(killswitch_enabled=True)
+        clash_http = httpx.AsyncClient(timeout=10.0)
+        clash = ClashClient(clash_http, base_url=clash_url)
+        data_plane = SingBoxDataPlane(service, clash, config_path=sb_config)
+        watchdog = Watchdog(StateServicesDeps(state, service))
+        closers.append(clash_http.aclose)
+    else:
+        kn_host = os.environ.get("YONDER_KEENETIC_HOST") or "http://192.168.1.1"
+        kn_user = os.environ.get("YONDER_KEENETIC_USER") or "admin"
+        kn_pw = os.environ.get("YONDER_KEENETIC_PW", "")
+        if not kn_pw:
+            logger.warning("YONDER_KEENETIC_PW is empty — DoH apply/restore will fail until set")
+        logger.info("xray configs: %s; router RCI: %s", xray_dir, kn_host)
+        # Kill switch on in production: bracket every xkeen restart with a
+        # fail-closed FORWARD DROP so the rule-flush window can't leak.
+        services = XKeenService(killswitch_enabled=True)
+        keenetic = KeeneticClient(host=kn_host, login=kn_user, password=kn_pw)
+        data_plane = XkeenDataPlane(state, services, keenetic, configs_dir=xray_dir)
+        watchdog = Watchdog(StateServicesDeps(state, services))
+        closers.append(keenetic.close)
+
+    pipeline = ApplyPipeline(state, data_plane)
 
     app.state.yonder_state = state
     app.state.yonder_pipeline = pipeline
     app.state.yonder_fetcher = fetcher
+    app.state.yonder_dataplane = data_plane
     app.state.yonder_xray_configs_dir = str(xray_dir)
 
     # Clear any kill-switch DROP left over from a hard kill (SIGKILL skips the
@@ -159,8 +182,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     await pipeline.start()
     await watchdog.start()
-    # Reconcile router state with whatever vpn_on persisted from the last
-    # run — a daemon restart never leaves xkeen out of sync.
+    # Reconcile the data plane with whatever vpn_on persisted from the last
+    # run — a daemon restart never leaves the proxy out of sync.
     pipeline.signal()
 
     try:
@@ -169,12 +192,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.info("shutting down background tasks")
         # Best-effort: gather all teardowns so a failure in one doesn't
         # leak the others.
-        import asyncio
-
         await asyncio.gather(
             pipeline.stop(),
             watchdog.stop(),
-            fetcher.aclose(),
-            keenetic.close(),
+            *(c() for c in closers),
             return_exceptions=True,
         )

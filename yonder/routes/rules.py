@@ -5,9 +5,9 @@ from __future__ import annotations
 import httpx
 from fastapi import APIRouter, HTTPException
 
-from yonder.deps import FetcherDep, PipelineDep, StateDep
+from yonder.deps import FetcherDep, PipelineDep, RulesParser, RulesParserDep, StateDep
 from yonder.fetch import FetchError, fetch_url
-from yonder.rules import RulesParseError, parse_xray_rules
+from yonder.rules import RulesParseError
 from yonder.schemas import RulesURLReq
 from yonder.state import Data, now_iso
 
@@ -16,7 +16,11 @@ router = APIRouter(prefix="/api", tags=["rules"])
 
 @router.post("/rules-url")
 async def set_rules_url(
-    req: RulesURLReq, state: StateDep, fetcher: FetcherDep, pipeline: PipelineDep
+    req: RulesURLReq,
+    state: StateDep,
+    fetcher: FetcherDep,
+    pipeline: PipelineDep,
+    parse_rules: RulesParserDep,
 ) -> Data:
     if not req.url:
         # Clear: fall back to the bundled default rules.
@@ -32,7 +36,7 @@ async def set_rules_url(
         pipeline.signal()
         return snap
 
-    rules = await _fetch_and_validate(fetcher, req.url)
+    rules = await _fetch_and_validate(fetcher, req.url, parse_rules)
 
     def install(d: Data) -> None:
         d.rules_url = req.url  # type: ignore[assignment]
@@ -48,11 +52,16 @@ async def set_rules_url(
 
 
 @router.post("/rules/refresh")
-async def refresh_rules(state: StateDep, fetcher: FetcherDep, pipeline: PipelineDep) -> Data:
+async def refresh_rules(
+    state: StateDep,
+    fetcher: FetcherDep,
+    pipeline: PipelineDep,
+    parse_rules: RulesParserDep,
+) -> Data:
     snap = state.snapshot()
     if not snap.rules_url:
         raise HTTPException(400, "no rules_url configured")
-    rules = await _fetch_and_validate(fetcher, snap.rules_url)
+    rules = await _fetch_and_validate(fetcher, snap.rules_url, parse_rules)
 
     def install(d: Data) -> None:
         d.rules_fetched_at = now_iso()
@@ -66,12 +75,14 @@ async def refresh_rules(state: StateDep, fetcher: FetcherDep, pipeline: Pipeline
     return out
 
 
-async def _fetch_and_validate(fetcher: httpx.AsyncClient, url: str) -> list[dict]:
+async def _fetch_and_validate(
+    fetcher: httpx.AsyncClient, url: str, parse_rules: RulesParser
+) -> list[dict]:
     try:
         raw = await fetch_url(fetcher, url)
     except FetchError as exc:
         raise HTTPException(502, str(exc)) from exc
     try:
-        return parse_xray_rules(raw)
+        return parse_rules(raw)
     except RulesParseError as exc:
         raise HTTPException(400, str(exc)) from exc
