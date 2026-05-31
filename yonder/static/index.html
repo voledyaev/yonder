@@ -5,7 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>yonder</title>
     <link rel="stylesheet" href="/style.css">
-    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <!-- Alpine.js vendored locally (not from CDN) so the control panel
+         bootstraps even when the VPN/proxy is down — which is exactly when
+         you need it to switch away from a dead server. Pinned 3.14.8. -->
+    <script defer src="/alpine.min.js"></script>
 </head>
 <body x-data="vpnui()" x-cloak>
 
